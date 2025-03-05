@@ -484,6 +484,12 @@ PJ_DEF(pj_status_t) pjsip_100rel_on_rx_prack( pjsip_inv_session *inv,
         return PJSIP_ENOTINITIALIZED;
     }
 
+    /* Always reply with 200/OK for PRACK */
+    status = pjsip_dlg_create_response(inv->dlg, rdata, 200, NULL, &tdata);
+    if (status == PJ_SUCCESS) {
+        status = pjsip_dlg_send_response(inv->dlg, tsx, tdata);
+    }
+
     /* Ignore if we don't have pending transmission */
     if (dd->uas_state == NULL || pj_list_empty(&dd->uas_state->tx_data_list)) {
         PJ_LOG(4,(dd->inv->dlg->obj_name, 
@@ -577,7 +583,7 @@ static void on_retransmit(pj_timer_heap_t *timer_heap,
         clear_all_responses(dd);
 
         /* Send 500 response */
-        status = pjsip_inv_end_session(dd->inv, 500, &reason, &tdata);
+        status = pjsip_inv_end_session(dd->inv, 504, &reason, &tdata);
         if (status == PJ_SUCCESS && tdata) {
             pjsip_dlg_send_response(dd->inv->dlg, 
                                     dd->inv->invite_tsx,
@@ -603,7 +609,10 @@ static void on_retransmit(pj_timer_heap_t *timer_heap,
             return;
         }
     } else {
-        pjsip_tsx_retransmit_no_state(dd->inv->invite_tsx, tdata);
+        if (dd->inv->invite_tsx)
+            pjsip_tsx_retransmit_no_state(dd->inv->invite_tsx, tdata);
+        else
+            pjsip_tx_data_dec_ref(tdata);
     }
 
     if (final) {
