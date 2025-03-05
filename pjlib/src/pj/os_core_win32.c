@@ -54,7 +54,7 @@
 #else
 #   define LOG_MUTEX(expr)  PJ_LOG(6,expr)
 #endif
-
+#   define LOG_MUTEX_WARN(expr)  PJ_LOG(1,expr)
 #define THIS_FILE       "os_core_win32.c"
 
 /*
@@ -581,7 +581,8 @@ PJ_DEF(pj_status_t) pj_thread_create( pj_pool_t *pool,
     if (strchr(thread_name, '%')) {
         pj_ansi_snprintf(rec->obj_name, PJ_MAX_OBJ_NAME, thread_name, rec);
     } else {
-        pj_ansi_strxcpy(rec->obj_name, thread_name, PJ_MAX_OBJ_NAME);
+        pj_ansi_strncpy(rec->obj_name, thread_name, PJ_MAX_OBJ_NAME);
+        rec->obj_name[PJ_MAX_OBJ_NAME-1] = '\0';
     }
 
     PJ_LOG(6, (rec->obj_name, "Thread created"));
@@ -980,6 +981,10 @@ PJ_DEF(void*) pj_thread_local_get(long index)
     //Can't check stack because this function is called
     //by PJ_CHECK_STACK() itself!!!
     //PJ_CHECK_STACK();
+    if (index == -1)
+    {
+        return 0;
+    }
 #if defined(PJ_WIN32_WINPHONE8) && PJ_WIN32_WINPHONE8
     return TlsGetValueRT(index);
 #else
@@ -1017,7 +1022,8 @@ static pj_status_t init_mutex(pj_mutex_t *mutex, const char *name)
     if (strchr(name, '%')) {
         pj_ansi_snprintf(mutex->obj_name, PJ_MAX_OBJ_NAME, name, mutex);
     } else {
-        pj_ansi_strxcpy(mutex->obj_name, name, PJ_MAX_OBJ_NAME);
+        pj_ansi_strncpy(mutex->obj_name, name, PJ_MAX_OBJ_NAME);
+        mutex->obj_name[PJ_MAX_OBJ_NAME-1] = '\0';
     }
 
     PJ_LOG(6, (mutex->obj_name, "Mutex created"));
@@ -1094,10 +1100,18 @@ PJ_DEF(pj_status_t) pj_mutex_lock(pj_mutex_t *mutex)
         status = PJ_STATUS_FROM_OS(GetLastError());
 
 #endif
-    LOG_MUTEX((mutex->obj_name, 
-              (status==PJ_SUCCESS ? "Mutex acquired by thread %s" : "FAILED by %s"),
-              pj_thread_this()->obj_name));
-
+    if (status == PJ_SUCCESS)
+    {
+        LOG_MUTEX((mutex->obj_name,
+            "Mutex acquired by thread %s",
+            pj_thread_this()->obj_name));
+    }
+    else
+    {
+        LOG_MUTEX_WARN((mutex->obj_name,
+           "FAILED by %s",
+            pj_thread_this()->obj_name));
+    }
 #if PJ_DEBUG
     if (status == PJ_SUCCESS) {
         mutex->owner = pj_thread_this();
@@ -1166,7 +1180,7 @@ PJ_DEF(pj_status_t) pj_mutex_trylock(pj_mutex_t *mutex)
         ++mutex->nesting_level;
 #endif
     } else {
-        LOG_MUTEX((mutex->obj_name, "Mutex: thread %s's trylock() failed", 
+        LOG_MUTEX((mutex->obj_name, "Mutex: thread %s's trylock() failed",
                                     pj_thread_this()->obj_name));
     }
 
@@ -1267,7 +1281,8 @@ PJ_DEF(pj_status_t) pj_sem_create( pj_pool_t *pool,
     if (strchr(name, '%')) {
         pj_ansi_snprintf(sem->obj_name, PJ_MAX_OBJ_NAME, name, sem);
     } else {
-        pj_ansi_strxcpy(sem->obj_name, name, PJ_MAX_OBJ_NAME);
+        pj_ansi_strncpy(sem->obj_name, name, PJ_MAX_OBJ_NAME);
+        sem->obj_name[PJ_MAX_OBJ_NAME-1] = '\0';
     }
 
     LOG_MUTEX((sem->obj_name, "Semaphore created"));
@@ -1296,7 +1311,7 @@ static pj_status_t pj_sem_wait_for(pj_sem_t *sem, unsigned timeout)
         LOG_MUTEX((sem->obj_name, "Semaphore acquired by thread %s", 
                                   pj_thread_this()->obj_name));
     } else {
-        LOG_MUTEX((sem->obj_name, "Semaphore: thread %s FAILED to acquire", 
+        LOG_MUTEX_WARN((sem->obj_name, "Semaphore: thread %s FAILED to acquire",
                                   pj_thread_this()->obj_name));
     }
 
@@ -1407,7 +1422,8 @@ PJ_DEF(pj_status_t) pj_event_create( pj_pool_t *pool,
     if (strchr(name, '%')) {
         pj_ansi_snprintf(event->obj_name, PJ_MAX_OBJ_NAME, name, event);
     } else {
-        pj_ansi_strxcpy(event->obj_name, name, PJ_MAX_OBJ_NAME);
+        pj_ansi_strncpy(event->obj_name, name, PJ_MAX_OBJ_NAME);
+        event->obj_name[PJ_MAX_OBJ_NAME-1] = '\0';
     }
 
     PJ_LOG(6, (event->obj_name, "Event created"));
@@ -1619,6 +1635,45 @@ PJ_DEF(int) pj_run_app(pj_main_func_ptr main_func, int argc, char *argv[],
     PJ_UNUSED_ARG(flags);
     return (*main_func)(argc, argv);
 }
+//////////////////////////////////////////////////////////////////////////
+typedef void(__cdecl* LPFNOUTPUTLN)(PVOID pcv, LPCSTR format, ...);
+static void __cdecl pfnWriteLn(PVOID pcv, const char* format, ...)
+{
+    va_list argptr;
+    va_start(argptr, format);
+    pj_log(pcv, 4, format, argptr);
+    va_end(argptr);
+}
+
+void LogThreadContext(const char* pcv)
+{
+    typedef HANDLE(WINAPI* LPFNDUMPTHREADCONTEXT)(DWORD dwThreadId, PCONTEXT pCtx, LPFNOUTPUTLN pfnWriteLn, PVOID pcv);
+    static LPFNDUMPTHREADCONTEXT lpfnDumpThreadContext = NULL;
+    HMODULE hTrcLogDll = NULL;
+    if (lpfnDumpThreadContext == NULL)
+    {
+        hTrcLogDll = LoadLibraryA("TrcLog64D.dll");
+        if (hTrcLogDll != NULL)
+        {
+            lpfnDumpThreadContext = (LPFNDUMPTHREADCONTEXT)GetProcAddress(hTrcLogDll, "DumpThreadContext");
+
+        }
+        if (lpfnDumpThreadContext == NULL)
+        {
+            SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+            return;
+        }
+    }
+
+    unsigned long id = GetCurrentThreadId();
+
+    CONTEXT ctx;
+    ctx.ContextFlags = CONTEXT_FULL;
+    RtlCaptureContext(&ctx);
+    lpfnDumpThreadContext(id, &ctx, pfnWriteLn, (PVOID)pcv);
+
+}
+
 
 /*
  * Set file descriptor close-on-exec flag
